@@ -1,10 +1,11 @@
 import sys
 import os
+import shutil
 import threading
 from tkinter import filedialog, messagebox
 from io import BytesIO
 import requests
-from PIL import Image
+from PIL import Image, ImageTk
 import customtkinter as ctk
 
 from database import (
@@ -31,7 +32,7 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # Надежная установка иконки с небольшой задержкой (чтобы CustomTkinter не перетер её)
+        # Надежная установка иконки с небольшой задержкой
         def set_app_icon():
             try:
                 if hasattr(sys, '_MEIPASS'):
@@ -40,11 +41,9 @@ class App(ctk.CTk):
                     icon_path = "icon.ico"
                     
                 if os.path.exists(icon_path):
-                    # Способ 1: через iconbitmap (идеально для .ico на Windows)
                     self.iconbitmap(icon_path)
             except Exception:
                 try:
-                    # Запасной способ через Pillow, если iconbitmap капризничает
                     from PIL import ImageTk
                     pil_icon = Image.open(icon_path)
                     self.icon_image = ImageTk.PhotoImage(pil_icon)
@@ -52,7 +51,6 @@ class App(ctk.CTk):
                 except Exception as e:
                     print(f"Не удалось установить иконку: {e}")
 
-        # Вызываем с задержкой в 200 мс, когда окно уже полностью прорисовалось
         self.after(200, set_app_icon)
 
         self.title("Set Completer")
@@ -68,7 +66,7 @@ class App(ctk.CTk):
         # Сайдбар
         self.sidebar_frame = ctk.CTkFrame(self, width=220, corner_radius=0)
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(4, weight=1)
+        self.sidebar_frame.grid_rowconfigure(6, weight=1)
 
         self.logo_label = ctk.CTkLabel(
             self.sidebar_frame,
@@ -78,31 +76,30 @@ class App(ctk.CTk):
         self.logo_label.grid(row=0, column=0, padx=20, pady=(25, 15))
 
         self.btn_my_sets = ctk.CTkButton(
-            self.sidebar_frame,
-            text="Мои наборы",
-            font=ctk.CTkFont(size=14),
-            height=35,
-            command=self.show_my_sets,
+            self.sidebar_frame, text="Мои наборы", font=ctk.CTkFont(size=14), height=35, command=self.show_my_sets,
         )
         self.btn_my_sets.grid(row=1, column=0, padx=20, pady=10)
 
         self.btn_multi_search = ctk.CTkButton(
-            self.sidebar_frame,
-            text="Мульти-поиск",
-            font=ctk.CTkFont(size=14),
-            height=35,
-            command=self.show_multi_search,
+            self.sidebar_frame, text="Мульти-поиск", font=ctk.CTkFont(size=14), height=35, command=self.show_multi_search,
         )
         self.btn_multi_search.grid(row=2, column=0, padx=20, pady=10)
 
         self.btn_add_set = ctk.CTkButton(
-            self.sidebar_frame,
-            text="Добавить набор",
-            font=ctk.CTkFont(size=14),
-            height=35,
-            command=self.show_add_set,
+            self.sidebar_frame, text="Добавить набор", font=ctk.CTkFont(size=14), height=35, command=self.show_add_set,
         )
         self.btn_add_set.grid(row=3, column=0, padx=20, pady=10)
+
+        self.btn_export_db = ctk.CTkButton(
+            self.sidebar_frame, text="Сохранить коллекции", font=ctk.CTkFont(size=14), height=35, command=self.export_database,
+        )
+        self.btn_export_db.grid(row=4, column=0, padx=20, pady=10)
+
+        self.btn_import_db = ctk.CTkButton(
+            self.sidebar_frame, text="Загрузить коллекции", font=ctk.CTkFont(size=14), height=35, 
+            fg_color="#455a64", hover_color="#37474f", command=self.import_database,
+        )
+        self.btn_import_db.grid(row=5, column=0, padx=20, pady=10)
 
         # Основная область
         self.main_frame = ctk.CTkScrollableFrame(self, corner_radius=10)
@@ -112,7 +109,19 @@ class App(ctk.CTk):
         self.search_image_queue = []
         self.selected_set_vars = {}
         self.selected_color_id = None
+        
         self.show_my_sets()
+        
+        # Глобальная привязка колесика мыши для скролла в Windows
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _on_mousewheel(self, event):
+        """Глобальный обработчик прокрутки колесиком мыши"""
+        try:
+            if self.main_frame.winfo_exists():
+                self.main_frame._parent_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        except Exception:
+            pass
 
     def scroll_to_top(self):
         self.after(10, lambda: self.main_frame._parent_canvas.yview_moveto(0))
@@ -122,7 +131,6 @@ class App(ctk.CTk):
             widget.destroy()
 
     def open_image_preview(self, img_url, title_text):
-        """Открывает модальное окно с увеличенным изображением"""
         if not img_url:
             return
 
@@ -157,24 +165,63 @@ class App(ctk.CTk):
 
         threading.Thread(target=load_high_res, daemon=True).start()
 
+    def export_database(self):
+        """Сохраняет текущую базу данных в файл"""
+        db_path = os.path.join(os.environ.get("LOCALAPPDATA", ""), "SetCompleter", "completer.db")
+        if not os.path.exists(db_path):
+            messagebox.showerror("Ошибка", "База данных пока пуста. Добавьте хотя бы один набор!")
+            return
+            
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".scbak",
+            filetypes=[("Set Completer Backup", "*.scbak"), ("All files", "*.*")],
+            initialfile="MyLegoCollection.scbak",
+            title="Сохранить файл коллекции"
+        )
+        
+        if filepath:
+            try:
+                shutil.copy2(db_path, filepath)
+                messagebox.showinfo("Успех", f"Коллекция успешно сохранена в файл:\n{filepath}")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось экспортировать файл: {e}")
+
+    def import_database(self):
+        """Загружает базу данных из файла, заменяя текущую"""
+        filepath = filedialog.askopenfilename(
+            filetypes=[("Set Completer Backup", "*.scbak"), ("All files", "*.*")],
+            title="Открыть файл коллекции"
+        )
+        
+        if filepath:
+            confirm = messagebox.askyesno(
+                "Внимание", 
+                "Текущая коллекция на этом компьютере будет ПОЛНОСТЬЮ ЗАМЕНЕНА данными из файла.\n\nВы уверены, что хотите загрузить этот файл?"
+            )
+            if confirm:
+                try:
+                    db_path = os.path.join(os.environ.get("LOCALAPPDATA", ""), "SetCompleter", "completer.db")
+                    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+                    
+                    shutil.copy2(filepath, db_path)
+                    messagebox.showinfo("Успех", "Коллекция успешно загружена!\nВсе ваши наборы и прогресс восстановлены.")
+                    self.show_my_sets() 
+                except Exception as e:
+                    messagebox.showerror("Ошибка", f"Не удалось импортировать файл: {e}")
+
     def show_my_sets(self):
         self.clear_main_frame()
         self.scroll_to_top()
 
         title = ctk.CTkLabel(
-            self.main_frame,
-            text="Мои наборы",
-            font=ctk.CTkFont(size=26, weight="bold"),
+            self.main_frame, text="Мои наборы", font=ctk.CTkFont(size=26, weight="bold"),
         )
         title.pack(anchor="w", pady=(0, 20))
 
         sets = get_all_sets()
         if not sets:
             ctk.CTkLabel(
-                self.main_frame,
-                text="Пока нет добавленных наборов.",
-                font=ctk.CTkFont(size=16),
-                text_color="gray",
+                self.main_frame, text="Пока нет добавленных наборов.", font=ctk.CTkFont(size=16), text_color="gray",
             ).pack(pady=20)
             return
 
@@ -193,16 +240,12 @@ class App(ctk.CTk):
 
             info_text = f"Артикул: {set_num}   |   {name} ({year})"
             ctk.CTkLabel(
-                left_block,
-                text=info_text,
-                font=ctk.CTkFont(size=16, weight="bold"),
+                left_block, text=info_text, font=ctk.CTkFont(size=16, weight="bold"),
             ).pack(anchor="w")
 
             progress_text = f"Собрано: {found} / {needed} шт. ({percent}%)"
             ctk.CTkLabel(
-                left_block,
-                text=progress_text,
-                font=ctk.CTkFont(size=13),
+                left_block, text=progress_text, font=ctk.CTkFont(size=13),
                 text_color="#81c784" if percent == 100 else "#b0bec5",
             ).pack(anchor="w", pady=(4, 6))
 
@@ -216,23 +259,14 @@ class App(ctk.CTk):
             btn_block.pack(side="right", padx=20, pady=15)
 
             open_btn = ctk.CTkButton(
-                btn_block,
-                text="Открыть",
-                font=ctk.CTkFont(size=14),
-                width=100,
-                height=35,
+                btn_block, text="Открыть", font=ctk.CTkFont(size=14), width=100, height=35,
                 command=lambda num=set_num: self.show_set_inventory(num, page=1),
             )
             open_btn.pack(side="left", padx=(0, 10))
 
             del_btn = ctk.CTkButton(
-                btn_block,
-                text="Удалить",
-                font=ctk.CTkFont(size=14),
-                width=80,
-                height=35,
-                fg_color="#c62828",
-                hover_color="#8e0000",
+                btn_block, text="Удалить", font=ctk.CTkFont(size=14), width=80, height=35,
+                fg_color="#c62828", hover_color="#8e0000",
                 command=lambda num=set_num, s_name=name: self.confirm_delete_set(num, s_name),
             )
             del_btn.pack(side="left")
@@ -254,29 +288,18 @@ class App(ctk.CTk):
         header_frame.pack(fill="x", pady=(0, 10))
 
         back_btn = ctk.CTkButton(
-            header_frame,
-            text="← Назад",
-            font=ctk.CTkFont(size=14),
-            width=110,
-            height=35,
-            command=self.show_my_sets,
+            header_frame, text="← Назад", font=ctk.CTkFont(size=14), width=110, height=35, command=self.show_my_sets,
         )
         back_btn.pack(side="left")
 
         title = ctk.CTkLabel(
-            header_frame,
-            text=f"Инвентарь набора {set_num}",
-            font=ctk.CTkFont(size=24, weight="bold"),
+            header_frame, text=f"Инвентарь набора {set_num}", font=ctk.CTkFont(size=24, weight="bold"),
         )
         title.pack(side="left", padx=20)
 
         export_btn = ctk.CTkButton(
-            header_frame,
-            text="Экспорт недостачи",
-            font=ctk.CTkFont(size=13),
-            fg_color="#ef6c00",
-            hover_color="#b53d00",
-            height=35,
+            header_frame, text="Экспорт в BrickLink (XML)", font=ctk.CTkFont(size=13),
+            fg_color="#ef6c00", hover_color="#b53d00", height=35,
             command=lambda num=set_num: self.export_set_missing(num),
         )
         export_btn.pack(side="right")
@@ -285,43 +308,77 @@ class App(ctk.CTk):
         filter_frame.pack(fill="x", pady=(0, 15), padx=5)
 
         ctk.CTkLabel(
-            filter_frame,
-            text="Фильтр по цвету:",
-            font=ctk.CTkFont(size=14, weight="bold"),
+            filter_frame, text="Фильтр по цвету:", font=ctk.CTkFont(size=14, weight="bold"),
         ).pack(side="left", padx=(0, 10))
 
-        colors = get_colors_for_sets([set_num])
-        color_map = {c[1]: c[0] for c in colors}
-        color_names = ["Все цвета"] + [c[1] for c in colors]
+        all_parts = get_set_parts(set_num)
+        color_stats = {}
+        total_parts_all_colors = 0
+        
+        for p in all_parts:
+            c_id = p[2]
+            req = p[7]
+            found = p[8]
+            
+            if c_id not in color_stats:
+                color_stats[c_id] = {"total": 0, "completed": True}
+                
+            color_stats[c_id]["total"] += req
+            total_parts_all_colors += req
+            
+            if found < req:
+                color_stats[c_id]["completed"] = False
+
+        db_colors = get_colors_for_sets([set_num])
+        color_map = {}
+        color_names = []
+
+        all_colors_base_str = f"Все цвета [{total_parts_all_colors} шт.]"
+        display_all_colors = f"➤ {all_colors_base_str}" if color_id is None else all_colors_base_str
+        color_names.append(display_all_colors)
+        color_map[display_all_colors] = None
+
+        for cid, cname in db_colors:
+            stats = color_stats.get(cid, {"total": 0, "completed": False})
+            disp_name = f"{cname} [{stats['total']} шт.]"
+            
+            if stats["completed"]:
+                disp_name += " (✓)"
+                
+            if cid == color_id:
+                disp_name = f"➤ {disp_name}"
+                
+            color_names.append(disp_name)
+            color_map[disp_name] = cid
 
         def on_color_change(choice):
-            c_id = color_map.get(choice) if choice != "Все цвета" else None
+            c_id = color_map.get(choice)
             self.show_set_inventory(set_num, page=1, color_id=c_id)
 
         color_dropdown = ctk.CTkOptionMenu(
-            filter_frame, values=color_names, width=220, command=on_color_change
+            filter_frame, values=color_names, width=280, command=on_color_change
         )
         color_dropdown.pack(side="left")
 
-        if color_id is not None:
-            for name, cid in color_map.items():
-                if cid == color_id:
-                    color_dropdown.set(name)
-                    break
-        else:
-            color_dropdown.set("Все цвета")
+        for name, cid in color_map.items():
+            if cid == color_id:
+                color_dropdown.set(name)
+                break
 
         hide_switch = ctk.CTkSwitch(
-            filter_frame,
-            text="Скрыть собранные",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            filter_frame, text="Скрыть собранные", font=ctk.CTkFont(size=13, weight="bold"),
             variable=self.hide_completed_var,
             command=lambda: self.show_set_inventory(set_num, page=1, color_id=color_id)
         )
-        hide_switch.pack(side="left", padx=30)
+        hide_switch.pack(side="left", padx=25)
 
-        all_parts = get_set_parts(set_num)
-        
+        refresh_btn = ctk.CTkButton(
+            filter_frame, text="↻ Обновить список", width=130, height=28,
+            fg_color="#1976d2", hover_color="#1565c0", font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda: self.show_set_inventory(set_num, page=page, color_id=color_id)
+        )
+        refresh_btn.pack(side="left", padx=10)
+
         if color_id is not None:
             all_parts = [p for p in all_parts if p[2] == color_id]
 
@@ -330,10 +387,8 @@ class App(ctk.CTk):
 
         if not all_parts:
             ctk.CTkLabel(
-                self.main_frame,
-                text="Детали не найдены (или все уже собраны).",
-                font=ctk.CTkFont(size=16),
-                text_color="gray",
+                self.main_frame, text="Детали не найдены (или все уже собраны).",
+                font=ctk.CTkFont(size=16), text_color="gray",
             ).pack(pady=20)
             return
 
@@ -359,10 +414,8 @@ class App(ctk.CTk):
                 sep_line = ctk.CTkFrame(separator_frame, height=2, fg_color="#555555")
                 sep_line.pack(fill="x", pady=(0, 10))
                 ctk.CTkLabel(
-                    separator_frame,
-                    text="Запасные детали (Extra Parts)",
-                    font=ctk.CTkFont(size=18, weight="bold"),
-                    text_color="#ffa726",
+                    separator_frame, text="Запасные детали (Extra Parts)",
+                    font=ctk.CTkFont(size=18, weight="bold"), text_color="#ffa726",
                 ).pack(anchor="w")
 
             row = ctk.CTkFrame(self.main_frame)
@@ -411,22 +464,16 @@ class App(ctk.CTk):
             btn_all = ctk.CTkButton(actions_frame, text="✓ Все", width=55, height=32, font=ctk.CTkFont(size=12), fg_color="#2e7d32", hover_color="#1b5e20")
             btn_all.pack(side="left", padx=4)
 
-            btn_missing = ctk.CTkButton(actions_frame, text="✕ Недостача", width=85, height=32, font=ctk.CTkFont(size=12), fg_color="#c62828", hover_color="#8e0000")
-            btn_missing.pack(side="left", padx=4)
-
             def bind_controls(
-                p_id=part_id, needed=req, current_found=found, current_missing=missing,
-                lbl=status_label, r_card=row, b_p=btn_plus, b_m=btn_minus, b_a=btn_all, b_mis=btn_missing,
+                p_id=part_id, needed=req, current_found=found,
+                lbl=status_label, r_card=row, b_p=btn_plus, b_m=btn_minus, b_a=btn_all
             ):
-                state = {"found": current_found, "missing": current_missing}
+                state = {"found": current_found}
 
                 def refresh_ui():
                     if state["found"] >= needed:
-                        lbl.configure(text=f"Найдено: {state['found']}/{needed}", text_color="#4caf50")
+                        lbl.configure(text=f"Собрано: {state['found']}/{needed}", text_color="#4caf50")
                         r_card.configure(border_width=1, border_color="#2e7d32")
-                    elif state["missing"] > 0:
-                        lbl.configure(text=f"Не хватает: {state['missing']}/{needed}", text_color="#ef5350")
-                        r_card.configure(border_width=1, border_color="#c62828")
                     else:
                         lbl.configure(text=f"Найдено: {state['found']}/{needed}", text_color="white")
                         r_card.configure(border_width=0)
@@ -434,31 +481,25 @@ class App(ctk.CTk):
                 def add_one():
                     if state["found"] < needed:
                         state["found"] += 1
-                        state["missing"] = max(0, needed - state["found"]) if state["missing"] > 0 else 0
-                        update_part_status(p_id, state["found"], state["missing"])
+                        missing = needed - state["found"]
+                        update_part_status(p_id, state["found"], missing)
                         refresh_ui()
 
                 def remove_one():
                     if state["found"] > 0:
                         state["found"] -= 1
-                        update_part_status(p_id, state["found"], state["missing"])
+                        missing = needed - state["found"]
+                        update_part_status(p_id, state["found"], missing)
                         refresh_ui()
 
                 def mark_all():
                     state["found"] = needed
-                    state["missing"] = 0
-                    update_part_status(p_id, state["found"], state["missing"])
-                    refresh_ui()
-
-                def mark_missing():
-                    state["missing"] = needed - state["found"]
-                    update_part_status(p_id, state["found"], state["missing"])
+                    update_part_status(p_id, state["found"], 0)
                     refresh_ui()
 
                 b_p.configure(command=add_one)
                 b_m.configure(command=remove_one)
                 b_a.configure(command=mark_all)
-                b_mis.configure(command=mark_missing)
                 refresh_ui()
 
             bind_controls()
@@ -481,9 +522,14 @@ class App(ctk.CTk):
         threading.Thread(target=self.process_image_queue, args=(queue_copy,), daemon=True).start()
 
     def export_set_missing(self, set_num):
+        # Принудительно обновляем базу перед экспортом, чтобы недостачей считалось (требуется - найдено)
+        all_parts = get_set_parts(set_num)
+        for p in all_parts:
+            update_part_status(p[0], p[8], max(0, p[7] - p[8]))
+            
         missing_parts = get_missing_parts_for_export(set_num)
         if not missing_parts:
-            messagebox.showinfo("Экспорт", "В этом наборе нет отмеченных недостающих деталей.")
+            messagebox.showinfo("Экспорт", "В этом наборе собраны абсолютно все детали!")
             return
 
         filepath = filedialog.asksaveasfilename(
@@ -505,7 +551,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(title_frame, text="Мульти-поиск деталей", font=ctk.CTkFont(size=26, weight="bold")).pack(side="left")
 
         ctk.CTkButton(
-            title_frame, text="Экспорт выбранных (BrickLink)", font=ctk.CTkFont(size=13),
+            title_frame, text="Экспорт в BrickLink (XML)", font=ctk.CTkFont(size=13),
             fg_color="#ef6c00", hover_color="#b53d00", height=35,
             command=self.export_multi_missing,
         ).pack(side="right")
@@ -535,13 +581,20 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(filter_frame, text="Фильтр по цвету:", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=(0, 10))
 
-        self.color_dropdown = ctk.CTkOptionMenu(filter_frame, values=["Все цвета"], width=220, command=self.on_color_selected)
+        self.color_dropdown = ctk.CTkOptionMenu(filter_frame, values=["Все цвета"], width=280, command=self.on_color_selected)
         self.color_dropdown.pack(side="left")
 
         ctk.CTkSwitch(
             filter_frame, text="Скрыть собранные", font=ctk.CTkFont(size=13, weight="bold"),
             variable=self.hide_completed_var, command=lambda: self.render_aggregated_parts(page=1)
-        ).pack(side="left", padx=30)
+        ).pack(side="left", padx=25)
+
+        refresh_btn = ctk.CTkButton(
+            filter_frame, text="↻ Обновить список", width=130, height=28,
+            fg_color="#1976d2", hover_color="#1565c0", font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.refresh_multi_search_view
+        )
+        refresh_btn.pack(side="left", padx=10)
 
         self.multi_results_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.multi_results_frame.pack(fill="x")
@@ -552,21 +605,70 @@ class App(ctk.CTk):
         return [s_num for s_num, var in self.selected_set_vars.items() if var.get()]
 
     def on_color_selected(self, choice):
-        if choice == "Все цвета":
-            self.selected_color_id = None
-        else:
-            self.selected_color_id = self.color_map.get(choice)
-        self.render_aggregated_parts(page=1)
+        self.selected_color_id = self.color_map.get(choice)
+        self.refresh_multi_search_view()
 
     def refresh_multi_search_view(self):
         active_sets = self.get_active_multi_sets()
-        colors = get_colors_for_sets(active_sets)
+        if not active_sets:
+            self.color_map = {}
+            self.color_dropdown.configure(values=["Все цвета"])
+            self.color_dropdown.set("Все цвета")
+            self.selected_color_id = None
+            self.render_aggregated_parts(page=1)
+            return
 
-        self.color_map = {c[1]: c[0] for c in colors}
-        color_names = ["Все цвета"] + [c[1] for c in colors]
+        all_agg_parts = get_aggregated_parts(active_sets, color_id=None)
+        color_stats = {}
+        total_parts_all_colors = 0
+        
+        for p in all_agg_parts:
+            c_id = p[1]
+            req = p[6]
+            found = p[7]
+            
+            if c_id not in color_stats:
+                color_stats[c_id] = {"total": 0, "completed": True}
+                
+            color_stats[c_id]["total"] += req
+            total_parts_all_colors += req
+            
+            if found < req:
+                color_stats[c_id]["completed"] = False
+
+        db_colors = get_colors_for_sets(active_sets)
+        self.color_map = {}
+        color_names = []
+
+        all_colors_base_str = f"Все цвета [{total_parts_all_colors} шт.]"
+        display_all_colors = f"➤ {all_colors_base_str}" if self.selected_color_id is None else all_colors_base_str
+        color_names.append(display_all_colors)
+        self.color_map[display_all_colors] = None
+
+        for cid, cname in db_colors:
+            stats = color_stats.get(cid, {"total": 0, "completed": False})
+            disp_name = f"{cname} [{stats['total']} шт.]"
+            
+            if stats["completed"]:
+                disp_name += " (✓)"
+                
+            if cid == self.selected_color_id:
+                disp_name = f"➤ {disp_name}"
+                
+            color_names.append(disp_name)
+            self.color_map[disp_name] = cid
+
         self.color_dropdown.configure(values=color_names)
-        self.color_dropdown.set("Все цвета")
-        self.selected_color_id = None
+
+        found = False
+        for name, cid in self.color_map.items():
+            if cid == self.selected_color_id:
+                self.color_dropdown.set(name)
+                found = True
+                break
+        if not found:
+            self.color_dropdown.set(display_all_colors)
+            self.selected_color_id = None
 
         self.render_aggregated_parts(page=1)
 
@@ -729,9 +831,14 @@ class App(ctk.CTk):
             messagebox.showinfo("Экспорт", "Выберите хотя бы один набор галочкой.")
             return
 
+        # Принудительно обновляем базу перед экспортом, чтобы недостачей считалось (требуется - найдено)
+        for s_num in active_sets:
+            for p in get_set_parts(s_num):
+                update_part_status(p[0], p[8], max(0, p[7] - p[8]))
+
         missing_parts = get_missing_parts_for_export(active_sets)
         if not missing_parts:
-            messagebox.showinfo("Экспорт", "В выбранных наборах нет отмеченных недостающих деталей.")
+            messagebox.showinfo("Экспорт", "В выбранных наборах собраны абсолютно все детали!")
             return
 
         filepath = filedialog.asksaveasfilename(
@@ -847,7 +954,7 @@ class App(ctk.CTk):
         threading.Thread(target=self.process_set_image_queue, args=(queue_copy,), daemon=True).start()
 
     def bind_download_btn(self, btn, set_num):
-        btn.configure(command=lambda: self.test_download(set_num, btn)) # Заменено на локальный обработчик
+        btn.configure(command=lambda: self.test_download(set_num, btn))
 
     def test_download(self, set_num, btn):
         self.start_download(set_num, btn)
@@ -865,7 +972,7 @@ class App(ctk.CTk):
 
     def download_process(self, set_num):
         success = fetch_and_save_set(set_num)
-        self.after(0, self.download_finished, success) # Исправлено: вызываем метод класса через self
+        self.after(0, self.download_finished, success)
 
     def download_finished(self, success):
         if success:
